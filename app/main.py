@@ -1,4 +1,5 @@
 from pathlib import Path
+import sqlite3
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
@@ -8,13 +9,18 @@ from itsdangerous import BadSignature, URLSafeSerializer
 from app.config import Config
 from app.db import get_db, init_db
 from app.services import (
+    DependencyBlockError,
+    add_dependency,
+    deactivate_dependency,
     execute_judgment,
+    list_dependencies,
     list_judgments,
     list_partitions,
     list_policies,
     list_reports,
     list_runs,
     list_scan_jobs,
+    list_snapshots,
     run_expire_scan,
     run_reconcile,
 )
@@ -149,9 +155,68 @@ def api_execute(request: Request, judgment_id: int):
     try:
         with get_db() as conn:
             run = execute_judgment(conn, judgment_id)
+    except DependencyBlockError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except sqlite3.OperationalError as exc:
+        # 写锁竞争（两人并线，未在 busy_timeout 内拿到锁）：整笔退回，提示重试
+        raise HTTPException(status_code=409, detail=f"写锁竞争，请稍后重试：{exc}") from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if run.get("blocked"):
+        # 整单拒绝：落库留痕已提交，HTTP 层以 409 表达拒绝，body 带回拒绝原因与快照
+        return JSONResponse(
+            {"ok": False, "blocked": True, "detail": run["block_reason"], "run": run},
+            status_code=409,
+        )
     return {"ok": True, "run": run}
+
+
+@app.get("/api/dependencies")
+def api_dependencies(request: Request, active_only: int = 1):
+    require_user(request)
+    with get_db() as conn:
+        return {"items": list_dependencies(conn, active_only=bool(active_only))}
+
+
+@app.post("/api/dependencies")
+async def api_add_dependency(request: Request):
+    require_user(request)
+    body = await request.json()
+    try:
+        downstream = int(body.get("downstream_partition_id"))
+        upstream = int(body.get("upstream_partition_id"))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="缺少合法的上下游分区编号") from exc
+    try:
+        with get_db() as conn:
+            dep = add_dependency(conn, downstream, upstream)
+    except DependencyBlockError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except sqlite3.OperationalError as exc:
+        raise HTTPException(status_code=409, detail=f"写锁竞争，请稍后重试：{exc}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "dependency": dep}
+
+
+@app.post("/api/dependencies/{dependency_id}/deactivate")
+def api_deactivate_dependency(request: Request, dependency_id: int):
+    require_user(request)
+    try:
+        with get_db() as conn:
+            dep = deactivate_dependency(conn, dependency_id)
+    except sqlite3.OperationalError as exc:
+        raise HTTPException(status_code=409, detail=f"写锁竞争，请稍后重试：{exc}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"ok": True, "dependency": dep}
+
+
+@app.get("/api/dependency-snapshots")
+def api_snapshots(request: Request):
+    require_user(request)
+    with get_db() as conn:
+        return {"items": list_snapshots(conn)}
 
 
 @app.get("/api/runs")

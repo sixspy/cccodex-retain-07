@@ -1,5 +1,7 @@
 import sqlite3
 
+from app.services.dependencies import broken_dependency_refs
+
 
 def run_reconcile(conn: sqlite3.Connection, as_of_date: str) -> dict:
     """策略视角与实物分区对账：统计各存储态，并找出「有完成裁决但状态不符」的错位。"""
@@ -30,15 +32,17 @@ def run_reconcile(conn: sqlite3.Connection, as_of_date: str) -> dict:
         """
     ).fetchall()
     mismatch_count = len(mismatches)
+    broken_refs = broken_dependency_refs(conn)
+    broken_count = len(broken_refs)
     summary = (
         f"在线{online} / 已归档{archived} / 已销毁{destroyed} / "
-        f"待执行裁决{pending} / 错位{mismatch_count}"
+        f"待执行裁决{pending} / 错位{mismatch_count} / 断链依赖{broken_count}"
     )
     cur = conn.execute(
         "INSERT INTO reconcile_reports "
         "(as_of_date, online_count, archived_count, destroyed_count, "
-        "pending_judgment_count, mismatch_count, summary) "
-        "VALUES (?,?,?,?,?,?,?)",
+        "pending_judgment_count, mismatch_count, broken_dependency_count, summary) "
+        "VALUES (?,?,?,?,?,?,?,?)",
         (
             as_of_date,
             online,
@@ -46,25 +50,29 @@ def run_reconcile(conn: sqlite3.Connection, as_of_date: str) -> dict:
             destroyed,
             int(pending),
             mismatch_count,
+            broken_count,
             summary,
         ),
     )
     report_id = int(cur.lastrowid)
     row = conn.execute(
         "SELECT id, as_of_date, online_count, archived_count, destroyed_count, "
-        "pending_judgment_count, mismatch_count, summary, created_at "
+        "pending_judgment_count, mismatch_count, broken_dependency_count, "
+        "summary, created_at "
         "FROM reconcile_reports WHERE id = ?",
         (report_id,),
     ).fetchone()
     report = dict(row)
     report["mismatches"] = [dict(m) for m in mismatches]
+    report["broken_dependencies"] = broken_refs
     return report
 
 
 def list_reports(conn: sqlite3.Connection) -> list[dict]:
     rows = conn.execute(
         "SELECT id, as_of_date, online_count, archived_count, destroyed_count, "
-        "pending_judgment_count, mismatch_count, summary, created_at "
+        "pending_judgment_count, mismatch_count, broken_dependency_count, "
+        "summary, created_at "
         "FROM reconcile_reports ORDER BY id DESC"
     ).fetchall()
     return [dict(r) for r in rows]

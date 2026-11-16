@@ -8,10 +8,23 @@ from app.config import Config
 def connect(db_path: str | None = None) -> sqlite3.Connection:
     path = db_path or Config.database()
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, check_same_thread=False)
+    conn = sqlite3.connect(path, check_same_thread=False, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    # 并发写时让后来者等待写锁而非立刻抛 SQLITE_BUSY，配合 BEGIN IMMEDIATE 串行化
+    conn.execute("PRAGMA busy_timeout = 10000")
     return conn
+
+
+def begin_immediate(conn: sqlite3.Connection) -> None:
+    """写流程入口显式拿数据库写锁（RESERVED）。
+
+    两人并线时只有一个事务能进入写区，其余在 busy_timeout 内排队，
+    保证依赖集合快照与分区态在同一序列化点读取，杜绝快照互盖与半截写入。
+    """
+    if conn.in_transaction:
+        return
+    conn.execute("BEGIN IMMEDIATE")
 
 
 @contextmanager
@@ -98,8 +111,33 @@ CREATE TABLE IF NOT EXISTS reconcile_reports (
   destroyed_count INTEGER NOT NULL,
   pending_judgment_count INTEGER NOT NULL,
   mismatch_count INTEGER NOT NULL,
+  broken_dependency_count INTEGER NOT NULL DEFAULT 0,
   summary TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS partition_dependencies (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  downstream_partition_id INTEGER NOT NULL,
+  upstream_partition_id INTEGER NOT NULL,
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(downstream_partition_id, upstream_partition_id),
+  FOREIGN KEY(downstream_partition_id) REFERENCES partitions(id),
+  FOREIGN KEY(upstream_partition_id) REFERENCES partitions(id)
+);
+
+-- 每次裁决执行时，对「依赖集合 + 上下游分区态」在同一事务内同源拍快照
+CREATE TABLE IF NOT EXISTS dependency_snapshots (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  judgment_id INTEGER NOT NULL,
+  target_partition_id INTEGER NOT NULL,
+  dependency_set_json TEXT NOT NULL,
+  aligned INTEGER NOT NULL,
+  block_reason TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY(judgment_id) REFERENCES judgments(id),
+  FOREIGN KEY(target_partition_id) REFERENCES partitions(id)
 );
 
 CREATE TABLE IF NOT EXISTS meta (
@@ -132,9 +170,20 @@ SEED_PARTITIONS = [
 ]
 
 
+def _migrate(conn: sqlite3.Connection) -> None:
+    """对旧库幂等补列（CREATE TABLE IF NOT EXISTS 不会改已有表）。"""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(reconcile_reports)")}
+    if "broken_dependency_count" not in cols:
+        conn.execute(
+            "ALTER TABLE reconcile_reports "
+            "ADD COLUMN broken_dependency_count INTEGER NOT NULL DEFAULT 0"
+        )
+
+
 def init_db(db_path: str | None = None) -> None:
     with get_db(db_path) as conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
         n = conn.execute("SELECT COUNT(*) AS c FROM retain_policies").fetchone()["c"]
         if n == 0:
             for domain_code, domain_name, keep_days, action in SEED_POLICIES:

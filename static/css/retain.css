@@ -177,6 +177,46 @@ th { color: var(--muted); font-weight: 550; }
 .tag.warn { color: var(--warn); border-color: #5a4d2e; }
 .tag.bad { color: var(--bad); border-color: #5a3535; }
 .empty { color: var(--muted); padding: 12px 0; }
+.detail-row td { background: #1c2330; }
+.dep-face { padding: 6px 4px 10px; }
+.face-title {
+  display: block;
+  color: var(--accent);
+  font-size: 12px;
+  letter-spacing: 0.05em;
+  margin-bottom: 6px;
+}
+.dep-list { margin: 0; padding-left: 4px; list-style: none; }
+.dep-list li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 0;
+  border-bottom: 1px dashed var(--line);
+  font-size: 12px;
+}
+.dep-list em { color: var(--muted); font-style: normal; }
+.arrow { color: var(--muted); text-align: center; }
+.blocked-row { background: rgba(201, 107, 107, 0.08); }
+.reject-card { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+.reject-reason {
+  margin: 0;
+  color: var(--bad);
+  font-size: 12px;
+  line-height: 1.5;
+  max-width: 360px;
+}
+.reject-card button { padding: 6px 10px; font-size: 12px; }
+select {
+  width: 100%;
+  margin-top: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  background: #18202c;
+  color: var(--ink);
+  font: inherit;
+}
 @media (max-width: 860px) {
   .layout { grid-template-columns: 1fr; }
   .nav { border-right: 0; border-bottom: 1px solid var(--line); display: flex; gap: 6px; overflow-x: auto; }
